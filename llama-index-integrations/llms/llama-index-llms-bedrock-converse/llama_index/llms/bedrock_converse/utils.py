@@ -1,3 +1,4 @@
+import json
 import logging
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from tenacity import (
@@ -208,7 +209,20 @@ def messages_to_converse_messages(
             assert "toolUseId" in tool_call, f"`toolUseId` not found in {tool_call}"
             assert "input" in tool_call, f"`input` not found in {tool_call}"
             assert "name" in tool_call, f"`name` not found in {tool_call}"
-            content.append({"toolUse": tool_call})
+            tool_input = (
+                json.loads(tool_call["input"])
+                if isinstance(tool_call["input"], str)
+                else tool_call["input"]
+            )
+            content.append(
+                {
+                    "toolUse": {
+                        "input": tool_input,
+                        "toolUseId": tool_call["toolUseId"],
+                        "name": tool_call["name"],
+                    }
+                }
+            )
         if len(content) > 0:
             converse_messages.append(
                 {
@@ -337,12 +351,7 @@ def converse_with_retry(
         {
             k: v
             for k, v in kwargs.items()
-            if (
-                k != "tools"
-                or k != "guardrail_identifier"
-                or k != "guardrail_version"
-                or k != "trace"
-            )
+            if k not in ["tools", "guardrail_identifier", "guardrail_version", "trace"]
         },
     )
 
@@ -395,12 +404,7 @@ async def converse_with_retry_async(
         {
             k: v
             for k, v in kwargs.items()
-            if (
-                k != "tools"
-                or k != "guardrail_identifier"
-                or k != "guardrail_version"
-                or k != "trace"
-            )
+            if k not in ["tools", "guardrail_identifier", "guardrail_version", "trace"]
         },
     )
 

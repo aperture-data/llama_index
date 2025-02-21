@@ -1083,7 +1083,10 @@ class QdrantVectorStore(BasePydanticVectorStore):
                         range=Range(lte=subfilter.value),
                     )
                 )
-            elif subfilter.operator == FilterOperator.TEXT_MATCH:
+            elif (
+                subfilter.operator == FilterOperator.TEXT_MATCH
+                or subfilter.operator == FilterOperator.TEXT_MATCH_INSENSITIVE
+            ):
                 conditions.append(
                     FieldCondition(
                         key=subfilter.key,
@@ -1141,9 +1144,6 @@ class QdrantVectorStore(BasePydanticVectorStore):
         return filter
 
     def _build_query_filter(self, query: VectorStoreQuery) -> Optional[Any]:
-        if not query.doc_ids and not query.query_str:
-            return None
-
         must_conditions = []
 
         if query.doc_ids:
@@ -1167,6 +1167,9 @@ class QdrantVectorStore(BasePydanticVectorStore):
 
         if query.filters and query.filters.filters:
             must_conditions.append(self._build_subfilter(query.filters))
+
+        if len(must_conditions) == 0:
+            return None
 
         return Filter(must=must_conditions)
 

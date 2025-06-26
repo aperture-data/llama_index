@@ -153,13 +153,19 @@ class ApertureDBGraphStore(PropertyGraphStore):
                         {
                             "FindEntity": {
                                 "_ref": i + 1,
-                                "is_connected_to": {"ref": i, "direction": "out"},
+                                "is_connected_to": {"ref": i},
                                 "results": {"all_properties": True, "limit": limit},
                             }
                         },
                         {
                             "FindConnection": {
                                 "src": i,
+                                "results": {"all_properties": True, "limit": limit},
+                            }
+                        },
+                        {
+                            "FindConnection": {
+                                "dst": i,
                                 "results": {"all_properties": True, "limit": limit},
                             }
                         },
@@ -176,9 +182,13 @@ class ApertureDBGraphStore(PropertyGraphStore):
                 for entity in response[0]["FindEntity"]["entities"]:
                     for c, ce in zip(
                         response[1]["FindEntity"]["entities"],
-                        response[2]["FindConnection"]["connections"],
+                        response[2]["FindConnection"].get("connections", [])
+                        + response[3]["FindConnection"].get("connections", []),
                     ):
-                        if ce[UNIQUEID_PROPERTY] in ignore_rels:
+                        if (
+                            UNIQUEID_PROPERTY in ce
+                            and ce[UNIQUEID_PROPERTY] in ignore_rels
+                        ):
                             continue
                         source = EntityNode(
                             name=entity[UNIQUEID_PROPERTY],
@@ -295,7 +305,7 @@ class ApertureDBGraphStore(PropertyGraphStore):
         response = []
         if len(entities) > 0:
             for e in entities:
-                if e["label"] == "text_chunk":
+                if "label" in e and e["label"] == "text_chunk":
                     node = ChunkNode(
                         properties={
                             "_node_content": e["node_content"],
@@ -306,7 +316,9 @@ class ApertureDBGraphStore(PropertyGraphStore):
                     )
                 else:
                     node = EntityNode(
-                        label=e["label"], properties=e, name=e[UNIQUEID_PROPERTY]
+                        label=e["label"] if "label" in e else "FIXME",
+                        properties=e,
+                        name=e[UNIQUEID_PROPERTY],
                     )
                 response.append(node)
 

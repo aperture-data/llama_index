@@ -224,8 +224,17 @@ def _uv_sync(
     package_path: Path, env: dict[str, str]
 ) -> subprocess.CompletedProcess:  # pragma: no cover
     """Run 'uv sync' on a package folder."""
+    args = ["uv", "sync"]
+    if package_path.name in {
+        "llama-index-graph-stores-ApertureDB",
+        "llama-index-vector-stores-ApertureDB",
+    }:
+        # The OCI latest tag can move independently of the integration lockfile.
+        args.extend(
+            ["--upgrade-package", "aperturedb", "--reinstall-package", "aperturedb"]
+        )
     return subprocess.run(
-        ["uv", "sync"],
+        args,
         cwd=package_path,
         text=True,
         capture_output=True,

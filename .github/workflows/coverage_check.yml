@@ -32,6 +32,11 @@ jobs:
           python-version: ${{ matrix.python-version }}
           enable-cache: true
 
+      - uses: ./.github/actions/prepare-aperturedb-sdk
+        if: matrix.python-version != '3.9'
+        with:
+          dockerhub: ${{ secrets.DOCKERHUB }}
+
       - name: Run tests with coverage
         shell: bash
         working-directory: llama-dev

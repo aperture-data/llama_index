@@ -6,6 +6,8 @@ from llama_index.graph_stores.ApertureDB import ApertureDBGraphStore
 import aperturedb
 import json
 
+import os
+import uuid
 import pytest
 
 
@@ -186,18 +188,66 @@ def test_ApertureDB_pg_store_delete(create_store, synthetic_data) -> None:
     delete_query_constraints = pg_store.client.queries[0][0]["DeleteEntity"][
         "constraints"
     ]
-    assert len(delete_query_constraints) == 1, json.dumps(
-        delete_query_constraints, indent=2
-    )
+    assert delete_query_constraints == [
+        "$uniqueid",
+        "in",
+        {"array": [e.id.capitalize() for e in entities]},
+    ]
 
 
 def test_ApertureDB_pg_store_structured_query(create_store, synthetic_data) -> None:
     entities, relations = synthetic_data
     pg_store = create_store(True)
 
-    pg_store.structured_query(
-        "FindEntity", {"constraints": [{"name": ["==", "James"]}]}
-    )
+    pg_store.structured_query("FindEntity", {"constraints": ["$name", "==", "James"]})
     assert len(pg_store.client.queries) == 1, json.dumps(
         pg_store.client.queries, indent=2
     )
+
+
+@pytest.mark.skipif(
+    not os.getenv("APERTUREDB_LLAMA_LIVE"),
+    reason="Requires a disposable ApertureDB 1.0 instance",
+)
+def test_native_property_graph_lifecycle():
+    from llama_index.core.graph_stores.types import ChunkNode
+
+    store = ApertureDBGraphStore()
+    name = "LlamaNode" + uuid.uuid4().hex
+    edge = "LlamaEdge" + uuid.uuid4().hex
+    first = EntityNode(
+        name="Alpha" + name, label=name, properties={"group": name, "color": "$blue"}
+    )
+    other = EntityNode(
+        name="Bravo" + name, label=name, properties={"group": name, "color": "red"}
+    )
+    chunk = ChunkNode(id_=name, text="passage", properties={"_node_type": "TextNode"})
+    relation = Relation(label=edge, source_id=first.id, target_id=other.id)
+    try:
+        store.upsert_nodes([first, other, chunk])
+        store.upsert_relations([relation, relation])
+        assert any(n.id == first.id.capitalize() for n in store.get())
+        matches = store.get(properties={"group": name, "color": "$blue"})
+        assert [n.id for n in matches] == [first.id.capitalize()]
+        assert [n.text for n in store.get(ids=[chunk.id])] == ["passage"]
+        triplets = store.get_rel_map([first], depth=2)
+        assert [(s.id, r.source_id, r.target_id, t.id) for s, r, t in triplets] == [
+            (first.id, first.id, other.id.capitalize(), other.id.capitalize())
+        ]
+        assert store.get_rel_map([first], ignore_rels=[edge]) == []
+        first.properties = {"group": name, "new": True}
+        store.upsert_nodes([first])
+        (refreshed,) = store.get(ids=[first.id])
+        assert (
+            refreshed.properties["new"] is True and "color" not in refreshed.properties
+        )
+        store.delete(relation_names=[edge])
+        assert store.get_rel_map([first]) == []
+        store.delete(properties={"group": name, "color": "red"})
+        assert [n.id for n in store.get(ids=[first.id, other.id])] == [
+            first.id.capitalize()
+        ]
+        store.delete(entity_names=[name])
+        assert store.get(ids=[first.id]) == []
+    finally:
+        store.delete(ids=[first.id, other.id, chunk.id])

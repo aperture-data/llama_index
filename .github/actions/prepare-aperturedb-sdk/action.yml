@@ -1,0 +1,35 @@
+name: Prepare ApertureDB SDK
+description: Pull the OCI wheel when testing the ApertureDB integrations or their core dependency
+inputs:
+  dockerhub:
+    description: Docker Hub read credentials
+    required: true
+runs:
+  using: composite
+  steps:
+    - id: scope
+      shell: bash
+      env:
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      run: |
+        if ! git diff --quiet "$BASE_SHA"...HEAD -- llama-index-core \
+          'llama-index-integrations/*/llama-index-*-stores-ApertureDB/**' \
+          scripts/prepare_aperturedb_sdk.py .github/actions/prepare-aperturedb-sdk; then
+          echo 'needed=true' >> "$GITHUB_OUTPUT"
+        fi
+    - uses: oras-project/setup-oras@v1
+      if: steps.scope.outputs.needed == 'true'
+      with:
+        version: 1.3.0
+    - name: Fetch the release wheel
+      if: steps.scope.outputs.needed == 'true'
+      shell: bash
+      env:
+        DOCKERHUB_USERNAME: ${{ fromJSON(inputs.dockerhub).username }}
+        DOCKERHUB_PASSWORD: ${{ fromJSON(inputs.dockerhub).password }}
+      run: |
+        export DOCKER_CONFIG
+        DOCKER_CONFIG=$(mktemp -d)
+        trap 'rm -rf "$DOCKER_CONFIG"' EXIT
+        printf '%s' "$DOCKERHUB_PASSWORD" | oras login registry-1.docker.io --username "$DOCKERHUB_USERNAME" --password-stdin
+        python scripts/prepare_aperturedb_sdk.py

@@ -29,11 +29,11 @@ name = "llama-index-graph-stores-ApertureDB"
 version = "0.2.1"
 description = "llama-index graph stores ApertureDB integration"
 authors = [{name = "ApertureData", email = "team@aperturedata.io"}]
-requires-python = ">=3.9,<4.0"
+requires-python = ">=3.10,<4.0"
 readme = "README.md"
 license = "MIT"
 dependencies = [
-    "aperturedb>=0.4.46",
+    "aperturedb>=1.0.3",
     "llama-index-core>=0.13.0,<0.15",
 ]
 
@@ -62,3 +62,12 @@ disallow_untyped_defs = true
 exclude = ["_static", "build", "examples", "notebooks", "venv"]
 ignore_missing_imports = true
 python_version = "3.8"
+
+[tool.uv.sources]
+aperturedb = { index = "aperturedb-oci" }
+
+[[tool.uv.index]]
+name = "aperturedb-oci"
+format = "flat"
+url = "../../../.aperturedb-sdk/index.html"
+explicit = true

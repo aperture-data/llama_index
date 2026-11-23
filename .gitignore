@@ -38,3 +38,5 @@ llama-index-core/llama_index/core/_static
 **/.coverage
 **/coverage.xml
 \nstorage/
+
+/.aperturedb-sdk/

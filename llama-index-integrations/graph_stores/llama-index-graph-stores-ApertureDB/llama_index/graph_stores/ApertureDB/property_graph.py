@@ -1,4 +1,5 @@
 import logging
+from aperturedb.Constraints import predicate
 from typing import Any, Dict, List, Optional
 from llama_index.core.graph_stores.types import (
     LabelledNode,
@@ -10,7 +11,6 @@ from llama_index.core.graph_stores.types import (
 )
 
 query_executor = None
-query_builder = None
 # Prefix for properties that are in the client metadata
 PROPERTY_PREFIX = "lm_"
 
@@ -28,7 +28,7 @@ def get_entity(client, label, id):
         {
             "FindEntity": {
                 "_ref": 1,
-                "constraints": {UNIQUEID_PROPERTY: ["==", id]},
+                "constraints": predicate(UNIQUEID_PROPERTY, "==", id),
                 "results": {"all_properties": True},
             }
         }
@@ -67,26 +67,25 @@ def changed(entity, properties):
 
 def query_for_ids(command: str, ids: List[str]) -> List[dict]:
     """Create a query for a list of ids."""
-    constraints = {}
-    constraints.setdefault("any", {UNIQUEID_PROPERTY: ["in", ids]})
+    params = {"constraints": predicate(UNIQUEID_PROPERTY, "in", ids)}
     if command == "FindEntity":
-        query = [{command: {"results": {"all_properties": True}}}]
-    else:
-        query = [{command: {}}]
-    if len(constraints) > 0:
-        query[0][command]["constraints"] = constraints
-    return query
+        params["results"] = {"all_properties": True}
+    return [{command: params}]
 
 
 def query_for_properties(command: str, properties: dict) -> List[dict]:
-    """Create a query for a list of properties."""
-    constraints = {}
-    for k, v in properties.items():
-        constraints.setdefault("all", {k: ["==", v]})
-    query = [{command: {"results": {"all_properties": True}}}]
-    if len(constraints) > 0:
-        query[0][command]["constraints"] = constraints
-    return query
+    terms = [predicate(key, "==", value) for key, value in properties.items()]
+    if command == "DeleteEntity":
+        terms.extend(
+            [
+                ["not", ["$label", "is_missing"]],
+                ["not", ["$" + UNIQUEID_PROPERTY, "is_missing"]],
+            ]
+        )
+    params = {"constraints": ["all", *terms]}
+    if command == "FindEntity":
+        params["results"] = {"all_properties": True}
+    return [{command: params}]
 
 
 class ApertureDBGraphStore(PropertyGraphStore):
@@ -109,18 +108,14 @@ class ApertureDBGraphStore(PropertyGraphStore):
     def __init__(self, *args, **kwargs) -> None:
         try:
             from aperturedb.CommonLibrary import create_connector, execute_query
-            from aperturedb.Query import QueryBuilder
         except ImportError:
             raise ImportError(
-                "ApertureDB is not installed. Please install it using "
-                "'pip install --upgrade aperturedb'"
+                "Install the ApertureDB SDK with pip install 'aperturedb>=1.0.3'."
             )
 
         self._client = create_connector()
         global query_executor
         query_executor = execute_query
-        global query_builder
-        query_builder = QueryBuilder
 
     def get_rel_map(
         self,
@@ -130,77 +125,56 @@ class ApertureDBGraphStore(PropertyGraphStore):
         ignore_rels: Optional[List[str]] = None,
     ) -> List[Triplet]:
         """Get depth-aware rel map."""
-        if subjs is None or len(subjs) == 0:
-            return []
-        if depth <= 0:
-            return []
-        rel_map = []
-        ignore_rels = ignore_rels or []
-        for s in subjs:
-            query = [
-                query_builder.find_command(
-                    oclass=s.label,
-                    params={
-                        "_ref": 1,
-                        "constraints": {UNIQUEID_PROPERTY: ["==", s.id]},
-                        "results": {"all_properties": True, "limit": limit},
+        frontier = list(subjs or [])
+        visited = set()
+        triplets = []
+        for _ in range(depth):
+            following = []
+            for source in frontier:
+                if source.id in visited or len(triplets) >= limit:
+                    continue
+                visited.add(source.id)
+                query = [
+                    {
+                        "FindEntity": {
+                            "with_class": source.label,
+                            "_ref": 1,
+                            "constraints": predicate(
+                                UNIQUEID_PROPERTY, "==", source.id.capitalize()
+                            ),
+                        }
                     },
-                )
-            ]
-            for i in range(1, 2):
-                query.extend(
-                    [
-                        {
-                            "FindEntity": {
-                                "_ref": i + 1,
-                                "is_connected_to": {"ref": i, "direction": "out"},
-                                "results": {"all_properties": True, "limit": limit},
-                            }
-                        },
-                        {
-                            "FindConnection": {
-                                "src": i,
-                                "results": {"all_properties": True, "limit": limit},
-                            }
-                        },
-                    ]
-                )
-            result, response, _ = query_executor(
-                self._client,
-                query,
-            )
-            assert result == 0, response
-
-            adjacent_nodes = []
-            if "entities" in response[0]["FindEntity"]:
-                for entity in response[0]["FindEntity"]["entities"]:
-                    for c, ce in zip(
-                        response[1]["FindEntity"]["entities"],
-                        response[2]["FindConnection"]["connections"],
-                    ):
-                        if ce[UNIQUEID_PROPERTY] in ignore_rels:
-                            continue
-                        source = EntityNode(
-                            name=entity[UNIQUEID_PROPERTY],
-                            label=entity["label"],
-                            properties=entity,
-                        )
-
-                        target = EntityNode(
-                            name=c[UNIQUEID_PROPERTY],
-                            label=c["label"],
-                            properties=c,
-                        )
-
-                        relation = Relation(
-                            source_id=c[UNIQUEID_PROPERTY],
-                            target_id=c[UNIQUEID_PROPERTY],
-                            label=ce[UNIQUEID_PROPERTY],
-                        )
-                        adjacent_nodes.append(target)
-                        rel_map.append([source, relation, target])
-                    rel_map.extend(self.get_rel_map(adjacent_nodes, depth - 1))
-        return rel_map
+                    {"FindConnection": {"src": 1, "results": {"all_properties": True}}},
+                ]
+                result, response, _ = query_executor(self._client, query)
+                assert result == 0, response
+                edges = [
+                    e
+                    for e in response[1]["FindConnection"].get("connections", [])
+                    if "dst_id" in e
+                    and UNIQUEID_PROPERTY in e
+                    and e[UNIQUEID_PROPERTY] not in (ignore_rels or [])
+                ]
+                if not edges:
+                    continue
+                targets = {n.id: n for n in self.get(ids=[e["dst_id"] for e in edges])}
+                for edge in edges:
+                    target = targets.get(edge["dst_id"])
+                    if target is None:
+                        continue
+                    relation = Relation(
+                        source_id=source.id,
+                        target_id=target.id,
+                        label=edge[UNIQUEID_PROPERTY],
+                    )
+                    triplets.append((source, relation, target))
+                    following.append(target)
+                    if len(triplets) >= limit:
+                        return triplets
+            frontier = following
+            if not frontier:
+                break
+        return triplets
 
     def delete(
         self,
@@ -230,7 +204,7 @@ class ApertureDBGraphStore(PropertyGraphStore):
                     {
                         "DeleteEntity": {
                             "with_class": name,
-                            "constraints": {"_uniqueid": ["!=", "0.0.0"]},
+                            "constraints": predicate("label", "==", name),
                         }
                     }
                 ]
@@ -245,7 +219,9 @@ class ApertureDBGraphStore(PropertyGraphStore):
                     {
                         "DeleteConnection": {
                             "with_class": relation_name,
-                            "constraints": {"_uniqueid": ["!=", "0.0.0"]},
+                            "constraints": predicate(
+                                UNIQUEID_PROPERTY, "==", relation_name
+                            ),
                         }
                     }
                 ]
@@ -258,59 +234,51 @@ class ApertureDBGraphStore(PropertyGraphStore):
     def get(
         self, properties: Optional[dict] = None, ids: Optional[List[str]] = None
     ) -> List[LabelledNode]:
-        entities = []
-        if ids and len(ids) > 0:
-            query = query_for_ids("FindEntity", ids)
-            result, response, _ = query_executor(
-                self._client,
-                query,
-            )
-            assert result == 0, response
-            entities.extend(response[0]["FindEntity"].get("entities", []))
-
-        elif properties and len(properties) > 0:
+        if ids:
+            query = query_for_ids("FindEntity", [id.capitalize() for id in ids])
+        elif properties:
             query = query_for_properties("FindEntity", properties)
-            result, response, _ = query_executor(
-                self._client,
-                query,
-            )
-            assert result == 0, response
-            entities.extend(response[0]["FindEntity"].get("entities", []))
-
         else:
             query = [
                 {
                     "FindEntity": {
-                        "results": {"all_properties": True, "limit": BATCHSIZE}
+                        "constraints": [
+                            "all",
+                            ["not", ["$label", "is_missing"]],
+                            ["not", ["$" + UNIQUEID_PROPERTY, "is_missing"]],
+                        ],
+                        "limit": BATCHSIZE,
+                        "results": {"all_properties": True},
                     }
                 }
             ]
-            result, response, _ = query_executor(
-                self._client,
-                query,
-            )
-            assert result == 0, response
-            entities.extend(response[0]["FindEntity"].get("entities", []))
-
-        response = []
-        if len(entities) > 0:
-            for e in entities:
-                if e["label"] == "text_chunk":
-                    node = ChunkNode(
+        result, response, _ = query_executor(self._client, query)
+        assert result == 0, response
+        nodes = []
+        for entity in response[0]["FindEntity"].get("entities", []):
+            if "label" not in entity or UNIQUEID_PROPERTY not in entity:
+                continue
+            if entity["label"] == "text_chunk":
+                nodes.append(
+                    ChunkNode(
                         properties={
-                            "_node_content": e["node_content"],
-                            "_node_type": e["node_type"],
+                            "_" + k: entity[k]
+                            for k in ("node_content", "node_type")
+                            if k in entity
                         },
-                        text=e["text"],
-                        id=e[UNIQUEID_PROPERTY],
+                        text=entity["text"],
+                        id_=entity[UNIQUEID_PROPERTY],
                     )
-                else:
-                    node = EntityNode(
-                        label=e["label"], properties=e, name=e[UNIQUEID_PROPERTY]
+                )
+            else:
+                nodes.append(
+                    EntityNode(
+                        label=entity["label"],
+                        properties=entity,
+                        name=entity[UNIQUEID_PROPERTY],
                     )
-                response.append(node)
-
-        return response
+                )
+        return nodes
 
     def get_triplets(
         self, entity_names=None, relation_names=None, properties=None, ids=None
@@ -328,10 +296,8 @@ class ApertureDBGraphStore(PropertyGraphStore):
 
     def upsert_nodes(self, nodes: List[EntityNode]) -> List[str]:
         ids = []
-        data = []
 
         for node in nodes:
-            # TODO: nodes can be of type EntityNode or ChunkNode
             properties = node.properties
             id = node.id.capitalize()
             if isinstance(node, ChunkNode):
@@ -354,7 +320,7 @@ class ApertureDBGraphStore(PropertyGraphStore):
                 command = {
                     "AddEntity": {
                         "class": node.label,
-                        "if_not_found": {UNIQUEID_PROPERTY: ["==", id]},
+                        "if_not_found": predicate(UNIQUEID_PROPERTY, "==", id),
                         "properties": combined_properties,
                     }
                 }
@@ -363,7 +329,8 @@ class ApertureDBGraphStore(PropertyGraphStore):
                 if len(to_update) > 0 or len(to_delete) > 0:
                     command = {
                         "UpdateEntity": {
-                            "constraints": {UNIQUEID_PROPERTY: ["==", id]},
+                            "with_class": node.label,
+                            "constraints": predicate(UNIQUEID_PROPERTY, "==", id),
                             "properties": to_update,
                             "remove_props": to_delete,
                         }
@@ -374,7 +341,6 @@ class ApertureDBGraphStore(PropertyGraphStore):
                 blobs = []
                 result, response, _ = query_executor(self._client, query, blobs)
                 assert result == 0, response
-                data.append((query, blobs))
                 ids.append(id)
 
         return ids
@@ -382,21 +348,21 @@ class ApertureDBGraphStore(PropertyGraphStore):
     def upsert_relations(self, relations: List[Relation]) -> None:
         """Upsert relations."""
         ids = []
-        for i, r in enumerate(relations):
+        for r in relations:
             query = [
                 {
                     "FindEntity": {
-                        "constraints": {
-                            UNIQUEID_PROPERTY: ["==", r.source_id.capitalize()]
-                        },
+                        "constraints": predicate(
+                            UNIQUEID_PROPERTY, "==", r.source_id.capitalize()
+                        ),
                         "_ref": 1,
                     }
                 },
                 {
                     "FindEntity": {
-                        "constraints": {
-                            UNIQUEID_PROPERTY: ["==", r.target_id.capitalize()]
-                        },
+                        "constraints": predicate(
+                            UNIQUEID_PROPERTY, "==", r.target_id.capitalize()
+                        ),
                         "_ref": 2,
                     }
                 },
@@ -411,11 +377,12 @@ class ApertureDBGraphStore(PropertyGraphStore):
                             "src_id": r.source_id.capitalize(),
                             "dst_id": r.target_id.capitalize(),
                         },
-                        "if_not_found": {
-                            UNIQUEID_PROPERTY: ["==", f"{r.id}"],
-                            "src_id": ["==", r.source_id.capitalize()],
-                            "dst_id": ["==", r.target_id.capitalize()],
-                        },
+                        "if_not_found": [
+                            "all",
+                            predicate(UNIQUEID_PROPERTY, "==", r.id),
+                            predicate("src_id", "==", r.source_id.capitalize()),
+                            predicate("dst_id", "==", r.target_id.capitalize()),
+                        ],
                     }
                 },
             ]

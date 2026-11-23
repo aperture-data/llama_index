@@ -20,7 +20,7 @@ from llama_index.core.vector_stores.types import (
     VectorStoreQueryResult,
 )
 
-from llama_index.core.vector_stores.types import FilterOperator
+from llama_index.core.vector_stores.types import FilterOperator, FilterCondition
 
 
 from llama_index.core.vector_stores.utils import (
@@ -29,7 +29,8 @@ from llama_index.core.vector_stores.utils import (
 )
 from llama_index.core.schema import MetadataMode
 from aperturedb.ParallelLoader import ParallelLoader
-from aperturedb.Constraints import Constraints
+from aperturedb.Constraints import Constraints, Conjunction, predicate
+from aperturedb.ServerCompatibility import preferred_vector_index
 
 # Default descriptorset name
 DESCRIPTOR_SET = "llamaindex"
@@ -53,7 +54,6 @@ class ApertureDBVectorStore(BasePydanticVectorStore):
     logger: logging.Logger = logging.getLogger(__name__)
 
     _client = PrivateAttr()
-    _execute_query = PrivateAttr()
 
     """
     ApertureDB vectorstore.
@@ -133,13 +133,12 @@ class ApertureDBVectorStore(BasePydanticVectorStore):
         # ApertureDB imports
         try:
             from aperturedb.Utils import Utils
-            from aperturedb.CommonLibrary import create_connector, execute_query
+            from aperturedb.CommonLibrary import create_connector
             from aperturedb.Descriptors import Descriptors
 
         except ImportError:
             raise ImportError(
-                "ApertureDB is not installed. Please install it using "
-                "'pip install --upgrade aperturedb'"
+                "Install the ApertureDB SDK with pip install 'aperturedb>=1.0.3'."
             )
 
         super().__init__(**kwargs)
@@ -157,7 +156,6 @@ class ApertureDBVectorStore(BasePydanticVectorStore):
         ## Returns a client for the database
         self._client = create_connector()
         self._descriptors = Descriptors(self._client)
-        self._execute_query = execute_query
         self._utils = Utils(self._client)
 
         try:
@@ -181,95 +179,51 @@ class ApertureDBVectorStore(BasePydanticVectorStore):
         """
         Checks if the descriptor set exists, if not, creates it.
         """
-        descriptor_set = self._descriptor_set
-        find_ds_query = [
-            {
-                "FindDescriptorSet": {
-                    "with_name": descriptor_set,
-                    "engines": True,
-                    "metrics": True,
-                    "dimensions": True,
-                    "results": {"all_properties": True},
-                }
-            }
-        ]
-        _, response, _ = self._execute_query(
-            client=self._client, query=find_ds_query, blobs=[]
-        )
-        n_entities = (
-            len(response[0]["FindDescriptorSet"]["entities"])
-            if "entities" in response[0]["FindDescriptorSet"]
-            else 0
-        )
-        assert n_entities <= 1, "Multiple descriptor sets with the same name"
-
-        if n_entities == 1:  # Descriptor set exists already
-            e = response[0]["FindDescriptorSet"]["entities"][0]
-            self.logger.info(f"Descriptor set {descriptor_set} already exists")
-
-            engines = e["_engines"]
-            assert len(engines) == 1, "Only one engine is supported"
-
-            if self._engine is None:
-                self._engine = engines[0]
-            elif self._engine != engines[0]:
-                self.logger.error(f"Engine mismatch: {self._engine} != {engines[0]}")
-
-            metrics = e["_metrics"]
-            assert len(metrics) == 1, "Only one metric is supported"
-            if self._metric is None:
-                self._metric = metrics[0]
-            elif self._metric != metrics[0]:
-                self.logger.error(f"Metric mismatch: {self._metric} != {metrics[0]}")
-
-            dimensions = e["_dimensions"]
-            if self._dimensions is None:
-                self._dimensions = dimensions
-            elif self._dimensions != dimensions:
-                self.logger.error(
-                    f"Dimensions mismatch: {self._dimensions} != {dimensions}"
+        indexes = self._utils.get_vector_indexes(self._descriptor_set)
+        if indexes:
+            index = preferred_vector_index(indexes, self._engine, self._metric)
+            if index is None:
+                raise ValueError(
+                    "Requested engine or metric is absent from the vector indexes"
                 )
-
+            params = index["params"]
+            if (
+                self._dimensions is not None
+                and self._dimensions != params["dimensions"]
+            ):
+                raise ValueError(
+                    "Embedding dimensions do not match the existing vector index"
+                )
+            self._dimensions = params["dimensions"]
+            self._engine = index["kind"].upper()
+            metrics = params["metric"]
+            self._metric = self._metric or (
+                metrics if isinstance(metrics, str) else metrics[0]
+            )
             self._properties = {
-                k[len(PROPERTY_PREFIX) :]: v
-                for k, v in e.items()
-                if k.startswith(PROPERTY_PREFIX)
+                key[len(PROPERTY_PREFIX) :]: value
+                for key, value in index.get("metadata", {}).items()
+                if key.startswith(PROPERTY_PREFIX)
             }
+            return
 
-        else:
-            self.logger.info(
-                f"Descriptor set {descriptor_set} does not exist. Creating it"
+        self._engine = self._engine or ENGINE
+        self._metric = self._metric or METRIC
+        if self._dimensions is None:
+            if self._embedding_function is None:
+                raise ValueError("Dimensions or an embedding function must be provided")
+            self._dimensions = len(self._embedding_function.get_text_embedding("test"))
+        metadata = {PROPERTY_PREFIX + k: v for k, v in (self._properties or {}).items()}
+        if not self._utils.create_vector_index(
+            self._descriptor_set, self._dimensions, self._metric, self._engine, metadata
+        ):
+            raise RuntimeError(f"Cannot create vector index for {self._descriptor_set}")
+        if not self._utils.create_entity_index(
+            f"descriptor:{self._descriptor_set}", UNIQUEID_PROPERTY
+        ):
+            raise RuntimeError(
+                f"Cannot index descriptor IDs for {self._descriptor_set}"
             )
-            if self._engine is None:
-                self._engine = ENGINE
-            if self._metric is None:
-                self._metric = METRIC
-            if self._dimensions is None:
-                assert self._embedding_function is not None, (
-                    "Dimensions or embedding function must be provided"
-                )
-                self._dimensions = len(
-                    self._embedding_function.get_text_embedding("test")
-                )
-
-            properties = (
-                {PROPERTY_PREFIX + k: v for k, v in self._properties.items()}
-                if self._properties is not None
-                else None
-            )
-
-            self._utils.add_descriptorset(
-                name=descriptor_set,
-                dim=self._dimensions,
-                engine=self._engine,
-                metric=self._metric,
-                properties=properties,
-            )
-
-            # Create indexes
-            self._utils.create_entity_index("_Descriptor", "_create_txn")
-            self._utils.create_entity_index("_DescriptorSet", "_name")
-            self._utils.create_entity_index("_Descriptor", UNIQUEID_PROPERTY)
 
     def add(
         self,
@@ -302,9 +256,9 @@ class ApertureDBVectorStore(BasePydanticVectorStore):
 
             command = {
                 "AddDescriptor": {
-                    "set": self._descriptor_set,
+                    "class": self._descriptor_set,
                     "properties": properties,  ## Can add arbitrary key value pairs here.
-                    "if_not_found": {UNIQUEID_PROPERTY: ["==", node.node_id]},
+                    "if_not_found": predicate(UNIQUEID_PROPERTY, "==", node.node_id),
                 }
             }
 
@@ -317,6 +271,10 @@ class ApertureDBVectorStore(BasePydanticVectorStore):
 
         loader = ParallelLoader(self._client)
         loader.ingest(data, batchsize=BATCHSIZE)
+        if loader.error_counter:
+            raise RuntimeError(
+                f"Failed to ingest {loader.error_counter} descriptor batches"
+            )
 
         return ids
 
@@ -341,10 +299,24 @@ class ApertureDBVectorStore(BasePydanticVectorStore):
         Return nodes as response.
         """
 
-        def convert_filters_to_constraints(query_filters: MetadataFilters) -> Dict:
+        def convert_filters_to_constraints(
+            query_filters: Optional[MetadataFilters],
+        ) -> Optional[Constraints]:
             if query_filters is None:
                 return None
-            constraints = Constraints()
+            if query_filters.condition not in (
+                None,
+                FilterCondition.AND,
+                FilterCondition.OR,
+            ):
+                raise ValueError(
+                    f"Unsupported filter condition: {query_filters.condition}"
+                )
+            constraints = Constraints(
+                Conjunction.OR
+                if query_filters.condition == FilterCondition.OR
+                else Conjunction.AND
+            )
             for filter in query_filters.filters:
                 key = f"{PROPERTY_PREFIX}{filter.key}"
                 if filter.operator == FilterOperator.EQ:
@@ -373,7 +345,7 @@ class ApertureDBVectorStore(BasePydanticVectorStore):
                         filter.value,
                     )
                 else:
-                    raise ValueError(f"Unsupported mode: {filter.mode}")
+                    raise ValueError(f"Unsupported filter operator: {filter.operator}")
             return constraints
 
         constraints = convert_filters_to_constraints(query.filters)
@@ -384,6 +356,8 @@ class ApertureDBVectorStore(BasePydanticVectorStore):
             vector=query.query_embedding,
             k_neighbors=query.similarity_top_k,
             distances=True,
+            engine=self._engine,
+            metric=self._metric,
         )
 
         nodes = []
@@ -399,7 +373,7 @@ class ApertureDBVectorStore(BasePydanticVectorStore):
             node.set_content(text)
 
             nodes.append(node)
-            ids.append(d.get("id"))
+            ids.append(d[UNIQUEID_PROPERTY])
             similarities.append(d["_distance"])
 
         return VectorStoreQueryResult(nodes=nodes, ids=ids, similarities=similarities)
@@ -417,14 +391,13 @@ class ApertureDBVectorStore(BasePydanticVectorStore):
             None
 
         """
-        ref_property_key_name = "ref_doc_id"
         query = [
             {
                 "DeleteDescriptor": {
-                    "constraints": {
-                        PROPERTY_PREFIX + ref_property_key_name: ["==", ref_doc_id]
-                    },
-                    "set": self._descriptor_set,
+                    "constraints": predicate(
+                        PROPERTY_PREFIX + "ref_doc_id", "==", ref_doc_id
+                    ),
+                    "with_class": self._descriptor_set,
                 }
             }
         ]
@@ -442,7 +415,7 @@ class ApertureDBVectorStore(BasePydanticVectorStore):
         query = [
             {
                 "DeleteDescriptor": {
-                    "set": self._descriptor_set,
+                    "with_class": self._descriptor_set,
                 }
             }
         ]

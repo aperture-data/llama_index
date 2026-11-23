@@ -68,11 +68,11 @@ exclude = ["_static", "build", "examples", "notebooks", "venv"]
 ignore_missing_imports = true
 python_version = "3.8"
 
-[tool.uv.sources]
-aperturedb = { index = "aperturedb-oci" }
-
 [[tool.uv.index]]
 name = "aperturedb-oci"
 format = "flat"
 url = "../../../.aperturedb-sdk/index.html"
 explicit = true
+
+[tool.uv.sources]
+aperturedb = {index = "aperturedb-oci"}

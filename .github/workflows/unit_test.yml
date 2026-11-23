@@ -32,8 +32,6 @@ jobs:
 
       - uses: ./.github/actions/prepare-aperturedb-sdk
         if: matrix.python-version != '3.9'
-        with:
-          dockerhub: ${{ secrets.DOCKERHUB }}
 
       - name: Run tests
         shell: bash

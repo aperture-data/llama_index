@@ -1,9 +1,5 @@
 name: Prepare ApertureDB SDK
 description: Pull the OCI wheel when testing the ApertureDB integrations or their core dependency
-inputs:
-  dockerhub:
-    description: Docker Hub read credentials
-    required: true
 runs:
   using: composite
   steps:
@@ -24,12 +20,4 @@ runs:
     - name: Fetch the release wheel
       if: steps.scope.outputs.needed == 'true'
       shell: bash
-      env:
-        DOCKERHUB_USERNAME: ${{ fromJSON(inputs.dockerhub).username }}
-        DOCKERHUB_PASSWORD: ${{ fromJSON(inputs.dockerhub).password }}
-      run: |
-        export DOCKER_CONFIG
-        DOCKER_CONFIG=$(mktemp -d)
-        trap 'rm -rf "$DOCKER_CONFIG"' EXIT
-        printf '%s' "$DOCKERHUB_PASSWORD" | oras login registry-1.docker.io --username "$DOCKERHUB_USERNAME" --password-stdin
-        python scripts/prepare_aperturedb_sdk.py
+      run: python scripts/prepare_aperturedb_sdk.py
